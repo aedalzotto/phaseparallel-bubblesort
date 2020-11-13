@@ -4,6 +4,8 @@
 #include <stdio.h>
 #include <mpi.h>
 
+#include <unistd.h>
+
 /* Define DEBUG by compiler's command line (-DDEBUG=1) */
 #ifndef DEBUG
 	#define DEBUG 1
@@ -59,6 +61,8 @@ int main(int argc, char *argv[])
 
 #if DEBUG == 1
 	printf("P%d: Populating array\n", mpi_rank);
+	MPI_Barrier(MPI_COMM_WORLD);
+	usleep(100);
 #endif
 
 	/* Populate array in decreasing order to execute worst case */
@@ -66,7 +70,11 @@ int main(int argc, char *argv[])
 		values[i] = ARRAY_LEN - ARRAY_LEN/mpi_size*mpi_rank - i;
 
 #if DEBUG == 1
+	printf("\nP%d: Array is -> ", mpi_rank);
 	print_array(values, SLICE_LEN);
+	printf("\n");
+	MPI_Barrier(MPI_COMM_WORLD);
+	usleep(100);
 #else
 	double then = MPI_Wtime();
 #endif
@@ -76,8 +84,11 @@ int main(int argc, char *argv[])
 		bubblesort(values, SLICE_LEN);
 
 	#if DEBUG == 1
-		printf("\nP%d: sorted array\n", mpi_rank);
+		printf("\nP%d: sorted local array -> ", mpi_rank);
 		print_array(values, SLICE_LEN);
+		printf("\n");
+		MPI_Barrier(MPI_COMM_WORLD);
+		usleep(100);
 	#endif
 
 		/* Send last (biggest) element to right */
@@ -87,6 +98,11 @@ int main(int argc, char *argv[])
 		#endif
 			MPI_Send(&values[SLICE_LEN - 1], 1, MPI_INT, mpi_rank + 1, 0, MPI_COMM_WORLD);
 		}
+	
+	#if DEBUG == 1
+		MPI_Barrier(MPI_COMM_WORLD);
+		usleep(100);
+	#endif
 
 		bool sorted = true;
 		if(mpi_rank != 0){
@@ -102,6 +118,11 @@ int main(int argc, char *argv[])
 			printf("P%d: %d > %d = %d\n", mpi_rank, values[0], biggest, sorted);
 		#endif
 		}
+
+	#if DEBUG == 1
+		MPI_Barrier(MPI_COMM_WORLD);
+		usleep(100);
+	#endif
 
 		/* Let every process know */
 		bool finished = true;
@@ -122,13 +143,27 @@ int main(int argc, char *argv[])
 			}
 		}
 
+	#if DEBUG == 1
+		MPI_Barrier(MPI_COMM_WORLD);
+		usleep(100);
+	#endif
+
 		/* If everybody is sorted, finish execution. */
 		if(finished)
 			break;
 
 		/* Send the lesser values to left */
-		if(mpi_rank != 0)
+		if(mpi_rank != 0){
 			MPI_Send(values, SLICE_LEN / 2, MPI_INT, mpi_rank - 1, 0, MPI_COMM_WORLD);
+		#if DEBUG == 1
+			printf("P%d: Sending values to left\n", mpi_rank);
+		#endif
+		}
+
+	#if DEBUG == 1
+		MPI_Barrier(MPI_COMM_WORLD);
+		usleep(100);
+	#endif
 
 		if(mpi_rank != mpi_size - 1){
 			MPI_Status mpi_status;
@@ -177,26 +212,62 @@ int main(int argc, char *argv[])
 			memcpy(&values[SLICE_LEN/2], combined, (SLICE_LEN/2 + SLICE_LEN%2)*sizeof(int));
 
 			/* Put the greater values back to the right values buffer */
-			memcpy(right_val, &combined[SLICE_LEN/2 + SLICE_LEN%2], (mpi_count)*sizeof(int));
+			memcpy(right_val, &combined[SLICE_LEN/2 + SLICE_LEN%2], mpi_count*sizeof(int));
+
+		#if DEBUG == 1
+			printf("P%d: Combined array (sent) -> ", mpi_rank);
+			print_array(values, SLICE_LEN);
+			printf("\n");
+		#endif
 
 			/* Send back the values to right */
 			MPI_Send(right_val, mpi_count, MPI_INT, mpi_rank + 1, 0, MPI_COMM_WORLD);
 		}
 
+	#if DEBUG == 1
+		MPI_Barrier(MPI_COMM_WORLD);
+		usleep(100);
+	#endif
+
 		/* Receive back the values from the left */
 		if(mpi_rank != 0){
 			MPI_Status mpi_status;
 			MPI_Recv(values, SLICE_LEN / 2, MPI_INT, mpi_rank - 1, 0, MPI_COMM_WORLD, &mpi_status);
+		#if DEBUG == 1
+			printf("P%d: Combined array (received) -> ", mpi_rank);
+			print_array(values, SLICE_LEN);
+			printf("\n");
+		#endif
 		}
+
+	#if DEBUG == 1
+		MPI_Barrier(MPI_COMM_WORLD);
+		usleep(100);
+	#endif
 
 	}
 
 	#if DEBUG == 1
-		printf("P%d: All process sorted\n", mpi_rank);
-		printf("\nP%d: sorted array\n", mpi_rank);
-		print_array(values, SLICE_LEN);
+		if(mpi_rank == 0){
+			printf("All process sorted\n");
+			printf("\nSorted array\n");
+		}
+		MPI_Barrier(MPI_COMM_WORLD);
+		usleep(100);
+		for(int i = 0; i < mpi_size; i++){
+			if(i == mpi_rank){
+				print_array(values, SLICE_LEN);
+				fflush(stdout);
+			}
+			MPI_Barrier(MPI_COMM_WORLD);
+			usleep(100);
+		}
+		if(mpi_rank == 0)
+			printf("\n");
 	#else
 		double now = MPI_Wtime();
+		if(mpi_rank == 0)
+			printf("Array sorted in %f\n", now - then);
 	#endif
 
 	free(values);
@@ -211,11 +282,6 @@ int main(int argc, char *argv[])
 		free(combined);
 		combined = NULL;
 	}
-
-#if DEBUG == 0
-	if(mpi_rank == 0)
-		printf("Array sorted in %f\n", now - then);
-#endif
 
 	MPI_Finalize();
 
@@ -253,10 +319,8 @@ void combine(int *src_a, int len_a, int *src_b, int len_b, int *dst, int length)
 #if DEBUG == 1
 void print_array(int *array, int len)
 {
-	printf("Array: ");
 	for(int i = 0; i < len; i++)
 		printf("%d ", array[i]);
-	printf("\n");
 }
 #endif
 
