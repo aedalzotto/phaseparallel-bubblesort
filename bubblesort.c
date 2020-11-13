@@ -30,7 +30,6 @@ int main(int argc, char *argv[])
 	int mpi_size;
 	MPI_Comm_size(MPI_COMM_WORLD, &mpi_size);
 
-
 	/* Default with 1.000.000 entries */
 	/* Or configure with compiler's command line (-DN=N) */
 #ifndef N
@@ -50,14 +49,46 @@ int main(int argc, char *argv[])
 	/* Allocate memory for the slice */
 	int *values = malloc(SLICE_LEN*sizeof(int));
 	if(values == NULL){
-		printf("P%d: Not enough memory to allocate array of length %d\n", mpi_rank, SLICE_LEN);
+		printf("P%d: Not enough memory to allocate array of length %d\n", mpi_rank, SLICE_LEN*sizeof(int));
 		MPI_Finalize();
 		exit(1);
 	}
 
-	/* Communication buffers. Avoid reallocation */
-	int *right_val = NULL;
-	int *combined = NULL;
+	/* Allocate memory for sorting status of all process */
+	bool *sorted = malloc(mpi_size*sizeof(bool));
+	if(sorted == NULL){
+		printf("P%d: Not enough memory to allocate array of length %d\n", mpi_rank, mpi_size*sizeof(bool));
+		free(values);
+		values = NULL;
+		MPI_Finalize();
+		exit(1);
+	}
+
+	/* Alocate memory for combining two sorted vectors. Size of worst case */
+	int *combined = malloc((ARRAY_LEN/mpi_size + ARRAY_LEN % mpi_size)*sizeof(int));
+	if(combined == NULL){
+		printf("P%d: Not enough memory to allocate array of length %d\n", mpi_rank, (ARRAY_LEN/mpi_size + ARRAY_LEN % mpi_size)*sizeof(int));
+		free(values);
+		values = NULL;
+		free(sorted);
+		sorted = NULL;
+		MPI_Finalize();
+		exit(1);
+	}
+
+	/* Communication buffer. Size of the worst case */
+	int *right_val = malloc((ARRAY_LEN/mpi_size + ARRAY_LEN % mpi_size)/2*sizeof(int));
+	if(right_val == NULL){
+		printf("P%d: Not enough memory to allocate array of length %d\n", mpi_rank, (ARRAY_LEN/mpi_size + ARRAY_LEN%mpi_size)/2*sizeof(int));
+		free(values);
+		values = NULL;
+		free(sorted);
+		sorted = NULL;
+		free(combined);
+		combined = NULL;
+		MPI_Finalize();
+		exit(1);
+	}
 
 #if DEBUG == 1
 	printf("P%d: Populating array\n", mpi_rank);
@@ -104,7 +135,7 @@ int main(int argc, char *argv[])
 		usleep(100);
 	#endif
 
-		bool sorted = true;
+		sorted[mpi_rank] = true;
 		if(mpi_rank != 0){
 			/* Receive biggest element from left */
 			int biggest;
@@ -112,10 +143,10 @@ int main(int argc, char *argv[])
 			MPI_Recv(&biggest, 1, MPI_INT, mpi_rank - 1, 0, MPI_COMM_WORLD, &mpi_status);
 
 			/* Check if left's biggest number is smaller than this slice smallest number */
-			sorted = values[0] > biggest;
+			sorted[mpi_rank] = values[0] > biggest;
 
 		#if DEBUG == 1
-			printf("P%d: %d > %d = %d\n", mpi_rank, values[0], biggest, sorted);
+			printf("P%d: %d > %d = %d\n", mpi_rank, values[0], biggest, sorted[mpi_rank]);
 		#endif
 		}
 
@@ -127,20 +158,9 @@ int main(int argc, char *argv[])
 		/* Let every process know */
 		bool finished = true;
 		for(int i = 1; i < mpi_size; i++){
-			bool aux;
 			/* If the current rank is the root of broadcast, send if it is sorted */
-			if(i == mpi_rank)
-				aux = sorted;
-			MPI_Bcast(&aux, 1, MPI_C_BOOL, i, MPI_COMM_WORLD);
-
-			/* If some of the processes is not sorted, don't continue the broadcast */
-			if(!aux){
-				finished = false;
-			#if DEBUG == 1
-				printf("P%d: process %d is not sorted\n", mpi_rank, i);
-			#endif
-				break;
-			}
+			MPI_Bcast(&sorted[i], 1, MPI_C_BOOL, i, MPI_COMM_WORLD);
+			finished = finished && sorted[i];
 		}
 
 	#if DEBUG == 1
@@ -153,7 +173,8 @@ int main(int argc, char *argv[])
 			break;
 
 		/* Send the lesser values to left */
-		if(mpi_rank != 0){
+		/* OPTIMIZE: Only send if not sorted with my left neighbor */
+		if(mpi_rank != 0 && !sorted[mpi_rank]){
 			MPI_Send(values, SLICE_LEN / 2, MPI_INT, mpi_rank - 1, 0, MPI_COMM_WORLD);
 		#if DEBUG == 1
 			printf("P%d: Sending values to left\n", mpi_rank);
@@ -165,45 +186,21 @@ int main(int argc, char *argv[])
 		usleep(100);
 	#endif
 
-		if(mpi_rank != mpi_size - 1){
+		/* OPTIMIZE: Only converge if not sorted with right neighbor */
+		if(mpi_rank != mpi_size - 1 && !sorted[mpi_rank + 1]){
 			MPI_Status mpi_status;
-			/* Only check for message size and allocate buffer if not allocated before */
-			static int mpi_count;
-			if(right_val == NULL){
+			/* Only check for message size if not received before */
+			static int mpi_count = 0;
+			if(mpi_count == 0){
 				/* Probe incoming message */
 				MPI_Probe(mpi_rank + 1, 0, MPI_COMM_WORLD, &mpi_status);
 
 				/* Check for its length */
 				MPI_Get_count(&mpi_status, MPI_INT, &mpi_count);
-
-				/* Create an array for lesser values of right */
-				right_val = malloc(mpi_count*sizeof(int));
-				if(right_val == NULL){
-					printf("P%d: Not enough memory to allocate array of length %d\n", mpi_rank, mpi_count);
-					MPI_Finalize();
-					free(values);
-					values = NULL;
-					exit(1);
-				}
 			}
 
 			/* Receive the values */
 			MPI_Recv(right_val, mpi_count, MPI_INT, mpi_rank + 1, 0, MPI_COMM_WORLD, &mpi_status);
-
-			/* Only allocate if not allocated before */
-			if(combined == NULL){
-				/* Create aux array for combined values */
-				combined = malloc((SLICE_LEN/2 + SLICE_LEN%2 + mpi_count)*sizeof(int));
-				if(combined == NULL){
-					printf("P%d: Not enough memory to allocate array of length %d\n", mpi_rank, SLICE_LEN/2 + SLICE_LEN%2 + mpi_count);
-					MPI_Finalize();
-					free(right_val);
-					right_val = NULL;
-					free(values);
-					values = NULL;
-					exit(1);
-				}
-			}
 
 			/* Combine lesser values from right with greater values from here */
 			combine(&values[SLICE_LEN/2], SLICE_LEN/2 + SLICE_LEN%2, right_val, mpi_count, combined, SLICE_LEN/2 + SLICE_LEN%2 + mpi_count);
@@ -272,16 +269,12 @@ int main(int argc, char *argv[])
 
 	free(values);
 	values = NULL;
-
-	if(right_val != NULL){
-		free(right_val);
-		right_val = NULL;
-	}
-
-	if(combined != NULL){
-		free(combined);
-		combined = NULL;
-	}
+	free(sorted);
+	sorted = NULL;
+	free(combined);
+	combined = NULL;
+	free(right_val);
+	right_val = NULL;
 
 	MPI_Finalize();
 
