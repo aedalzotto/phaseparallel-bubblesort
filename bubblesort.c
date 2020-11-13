@@ -11,6 +11,16 @@
 	#define DEBUG 1
 #endif
 
+/* If true, only use bubblesort in first iteration, then use combining */
+#ifndef USE_COMBINE
+	#define USE_COMBINE 1
+#endif
+
+/* If true, try to converge all values, but optimize broadcast not sending all */
+#ifndef FULL_CONVERGE
+	#define FULL_CONVERGE 0
+#endif
+
 void bubblesort(int *array, const int SIZE);
 void combine(int *src_a, int len_a, int *src_b, int len_b, int *dst, int length);
 #if DEBUG == 1
@@ -111,8 +121,21 @@ int main(int argc, char *argv[])
 #endif
 
 	while(true){
-		/* Sort the local array */
-		bubblesort(values, SLICE_LEN);
+	#if USE_COMBINE == 1
+		static int first_sort = true;
+		if(first_sort){
+	#endif
+			/* Sort the local array */
+			bubblesort(values, SLICE_LEN);
+	#if USE_COMBINE == 1
+		} else {
+			/* The array is partially sorted. Only combine the values */
+			combine(values, SLICE_LEN/2, &values[SLICE_LEN/2], SLICE_LEN/2 + SLICE_LEN%2, combined, SLICE_LEN);
+
+			/* Now put the values back to the main array */
+			memcpy(values, combined, SLICE_LEN);
+		}
+	#endif
 
 	#if DEBUG == 1
 		printf("\nP%d: sorted local array -> ", mpi_rank);
@@ -161,6 +184,11 @@ int main(int argc, char *argv[])
 			/* If the current rank is the root of broadcast, send if it is sorted */
 			MPI_Bcast(&sorted[i], 1, MPI_C_BOOL, i, MPI_COMM_WORLD);
 			finished = finished && sorted[i];
+		#if FULL_CONVERGE == 1
+			/* Don't continue with broadcast if one of the arrays is not sorted */
+			if(!finished)
+				break;
+		#endif
 		}
 
 	#if DEBUG == 1
@@ -173,8 +201,13 @@ int main(int argc, char *argv[])
 			break;
 
 		/* Send the lesser values to left */
-		/* OPTIMIZE: Only send if not sorted with my left neighbor */
-		if(mpi_rank != 0 && !sorted[mpi_rank]){
+		if(
+			mpi_rank != 0 
+		#if FULL_CONVERGE == 0
+			/* OPTIMIZE: Only send if not sorted with my left neighbor */
+			&& !sorted[mpi_rank]
+		#endif
+		){
 			MPI_Send(values, SLICE_LEN / 2, MPI_INT, mpi_rank - 1, 0, MPI_COMM_WORLD);
 		#if DEBUG == 1
 			printf("P%d: Sending values to left\n", mpi_rank);
@@ -186,8 +219,13 @@ int main(int argc, char *argv[])
 		usleep(100);
 	#endif
 
-		/* OPTIMIZE: Only converge if not sorted with right neighbor */
-		if(mpi_rank != mpi_size - 1 && !sorted[mpi_rank + 1]){
+		if(
+			mpi_rank != mpi_size - 1 
+		#if FULL_CONVERGE == 0
+			/* OPTIMIZE: Only converge if not sorted with right neighbor */
+			&& !sorted[mpi_rank + 1]
+		#endif
+		){
 			MPI_Status mpi_status;
 			/* Only check for message size if not received before */
 			static int mpi_count = 0;
