@@ -59,15 +59,15 @@ int main(int argc, char *argv[])
 	/* Allocate memory for the slice */
 	int *values = malloc(SLICE_LEN*sizeof(int));
 	if(values == NULL){
-		printf("P%d: Not enough memory to allocate array of length %d\n", mpi_rank, SLICE_LEN*sizeof(int));
+		printf("P%d: Not enough memory to allocate array of length %lu\n", mpi_rank, SLICE_LEN*sizeof(int));
 		MPI_Finalize();
 		exit(1);
 	}
 
 	/* Allocate memory for sorting status of all process */
-	bool *sorted = malloc(mpi_size*sizeof(bool));
+	unsigned char *sorted = malloc(mpi_size*sizeof(unsigned char));
 	if(sorted == NULL){
-		printf("P%d: Not enough memory to allocate array of length %d\n", mpi_rank, mpi_size*sizeof(bool));
+		printf("P%d: Not enough memory to allocate array of length %lu\n", mpi_rank, mpi_size*sizeof(unsigned char));
 		free(values);
 		values = NULL;
 		MPI_Finalize();
@@ -77,7 +77,7 @@ int main(int argc, char *argv[])
 	/* Alocate memory for combining two sorted vectors. Size of worst case */
 	int *combined = malloc((ARRAY_LEN/mpi_size + ARRAY_LEN % mpi_size)*sizeof(int));
 	if(combined == NULL){
-		printf("P%d: Not enough memory to allocate array of length %d\n", mpi_rank, (ARRAY_LEN/mpi_size + ARRAY_LEN % mpi_size)*sizeof(int));
+		printf("P%d: Not enough memory to allocate array of length %lu\n", mpi_rank, (ARRAY_LEN/mpi_size + ARRAY_LEN % mpi_size)*sizeof(int));
 		free(values);
 		values = NULL;
 		free(sorted);
@@ -89,7 +89,7 @@ int main(int argc, char *argv[])
 	/* Communication buffer. Size of the worst case */
 	int *right_val = malloc((ARRAY_LEN/mpi_size + ARRAY_LEN % mpi_size)/2*sizeof(int));
 	if(right_val == NULL){
-		printf("P%d: Not enough memory to allocate array of length %d\n", mpi_rank, (ARRAY_LEN/mpi_size + ARRAY_LEN%mpi_size)/2*sizeof(int));
+		printf("P%d: Not enough memory to allocate array of length %lu\n", mpi_rank, (ARRAY_LEN/mpi_size + ARRAY_LEN%mpi_size)/2*sizeof(int));
 		free(values);
 		values = NULL;
 		free(sorted);
@@ -182,7 +182,7 @@ int main(int argc, char *argv[])
 		bool finished = true;
 		for(int i = 1; i < mpi_size; i++){
 			/* If the current rank is the root of broadcast, send if it is sorted */
-			MPI_Bcast(&sorted[i], 1, MPI_C_BOOL, i, MPI_COMM_WORLD);
+			MPI_Bcast(&sorted[i], 1, MPI_UNSIGNED_CHAR, i, MPI_COMM_WORLD);
 			finished = finished && sorted[i];
 		#if FULL_CONVERGE == 1
 			/* Don't continue with broadcast if one of the arrays is not sorted */
