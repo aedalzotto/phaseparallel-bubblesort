@@ -122,18 +122,19 @@ int main(int argc, char *argv[])
 
 	while(true){
 	#if USE_COMBINE == 1
-		static int first_sort = true;
+		static bool first_sort = true;
 		if(first_sort){
 	#endif
 			/* Sort the local array */
 			bubblesort(values, SLICE_LEN);
 	#if USE_COMBINE == 1
+			first_sort = false;
 		} else {
 			/* The array is partially sorted. Only combine the values */
 			combine(values, SLICE_LEN/2, &values[SLICE_LEN/2], SLICE_LEN/2 + SLICE_LEN%2, combined, SLICE_LEN);
 
 			/* Now put the values back to the main array */
-			memcpy(values, combined, SLICE_LEN);
+			memcpy(values, combined, SLICE_LEN*sizeof(int));
 		}
 	#endif
 
