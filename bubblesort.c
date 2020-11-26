@@ -8,7 +8,7 @@
 
 /* Define DEBUG by compiler's command line (-DDEBUG=1) */
 #ifndef DEBUG
-	#define DEBUG 1
+	#define DEBUG 0
 #endif
 
 /* If true, only use bubblesort in first iteration, then use combining */
