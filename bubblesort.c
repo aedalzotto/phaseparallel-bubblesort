@@ -11,18 +11,26 @@
 	#define DEBUG 0
 #endif
 
-/* If true, only use bubblesort in first iteration, then use combining */
-#ifndef USE_COMBINE
-	#define USE_COMBINE 1
+/* If true, only use bubblesort in first iteration, then use merge */
+#ifndef PREFER_MERGE
+	#define PREFER_MERGE 1
 #endif
 
-/* If true, try to converge all values, but optimize broadcast not sending all */
-#ifndef FULL_CONVERGE
-	#define FULL_CONVERGE 0
+/* Try to skip unnecessary converge phase at cost of more broadcasts */
+#ifndef SKIP_CONVERGE
+	#define SKIP_CONVERGE 1
+#endif
+
+/* Size of the converge phase slice. Default is 2 (length will be process' array size divided by 2) */
+#ifndef CONV_DIV
+	#define CONV_DIV 2
 #endif
 
 void bubblesort(int *array, const int SIZE);
-void combine(int *src_a, int len_a, int *src_b, int len_b, int *dst, int length);
+void merge_2(int *src_a, int len_a, int *src_b, int len_b, int *dst, int length);
+#if PREFER_MERGE == 1
+void merge_3(int *src_a, int len_a, int *src_b, int len_b, int *src_c, int len_c, int *dst, int length);
+#endif
 #if DEBUG == 1
 void print_array(int *array, int len);
 #endif
@@ -87,9 +95,9 @@ int main(int argc, char *argv[])
 	}
 
 	/* Communication buffer. Size of the worst case */
-	int *right_val = malloc((ARRAY_LEN/mpi_size + ARRAY_LEN % mpi_size)/2*sizeof(int));
+	int *right_val = malloc((ARRAY_LEN/mpi_size + ARRAY_LEN % mpi_size)/CONV_DIV*sizeof(int));
 	if(right_val == NULL){
-		printf("P%d: Not enough memory to allocate array of length %lu\n", mpi_rank, (ARRAY_LEN/mpi_size + ARRAY_LEN%mpi_size)/2*sizeof(int));
+		printf("P%d: Not enough memory to allocate array of length %lu\n", mpi_rank, (ARRAY_LEN/mpi_size + ARRAY_LEN%mpi_size)/CONV_DIV*sizeof(int));
 		free(values);
 		values = NULL;
 		free(sorted);
@@ -121,17 +129,20 @@ int main(int argc, char *argv[])
 #endif
 
 	while(true){
-	#if USE_COMBINE == 1
+		/* Length of received message. Will be set on first iteration */
+		static int mpi_count = 0;
+
+	#if PREFER_MERGE == 1
 		static bool first_sort = true;
 		if(first_sort){
 	#endif
 			/* Sort the local array */
 			bubblesort(values, SLICE_LEN);
-	#if USE_COMBINE == 1
+	#if PREFER_MERGE == 1
 			first_sort = false;
 		} else {
 			/* The array is partially sorted. Only combine the values */
-			combine(values, SLICE_LEN/2, &values[SLICE_LEN/2], SLICE_LEN/2 + SLICE_LEN%2, combined, SLICE_LEN);
+			merge_3(values, SLICE_LEN/CONV_DIV, &values[SLICE_LEN/CONV_DIV], SLICE_LEN - SLICE_LEN/CONV_DIV*2, &values[SLICE_LEN - SLICE_LEN/CONV_DIV], SLICE_LEN/CONV_DIV, combined, SLICE_LEN);
 
 			/* Now put the values back to the main array */
 			memcpy(values, combined, SLICE_LEN*sizeof(int));
@@ -185,7 +196,7 @@ int main(int argc, char *argv[])
 			/* If the current rank is the root of broadcast, send if it is sorted */
 			MPI_Bcast(&sorted[i], 1, MPI_UNSIGNED_CHAR, i, MPI_COMM_WORLD);
 			finished = finished && sorted[i];
-		#if FULL_CONVERGE == 1
+		#if SKIP_CONVERGE == 0
 			/* Don't continue with broadcast if one of the arrays is not sorted */
 			if(!finished)
 				break;
@@ -204,12 +215,12 @@ int main(int argc, char *argv[])
 		/* Send the lesser values to left */
 		if(
 			mpi_rank != 0 
-		#if FULL_CONVERGE == 0
+		#if SKIP_CONVERGE == 1
 			/* OPTIMIZE: Only send if not sorted with my left neighbor */
 			&& !sorted[mpi_rank]
 		#endif
 		){
-			MPI_Send(values, SLICE_LEN / 2, MPI_INT, mpi_rank - 1, 0, MPI_COMM_WORLD);
+			MPI_Send(values, SLICE_LEN/CONV_DIV, MPI_INT, mpi_rank - 1, 0, MPI_COMM_WORLD);
 		#if DEBUG == 1
 			printf("P%d: Sending values to left\n", mpi_rank);
 		#endif
@@ -222,14 +233,13 @@ int main(int argc, char *argv[])
 
 		if(
 			mpi_rank != mpi_size - 1 
-		#if FULL_CONVERGE == 0
+		#if SKIP_CONVERGE == 1
 			/* OPTIMIZE: Only converge if not sorted with right neighbor */
 			&& !sorted[mpi_rank + 1]
 		#endif
 		){
 			MPI_Status mpi_status;
 			/* Only check for message size if not received before */
-			static int mpi_count = 0;
 			if(mpi_count == 0){
 				/* Probe incoming message */
 				MPI_Probe(mpi_rank + 1, 0, MPI_COMM_WORLD, &mpi_status);
@@ -242,13 +252,10 @@ int main(int argc, char *argv[])
 			MPI_Recv(right_val, mpi_count, MPI_INT, mpi_rank + 1, 0, MPI_COMM_WORLD, &mpi_status);
 
 			/* Combine lesser values from right with greater values from here */
-			combine(&values[SLICE_LEN/2], SLICE_LEN/2 + SLICE_LEN%2, right_val, mpi_count, combined, SLICE_LEN/2 + SLICE_LEN%2 + mpi_count);
+			merge_2(&values[SLICE_LEN - SLICE_LEN/CONV_DIV], SLICE_LEN/CONV_DIV, right_val, mpi_count, combined, SLICE_LEN/2 + SLICE_LEN%2 + mpi_count);
 
 			/* Put the lesser values back to this process */
-			memcpy(&values[SLICE_LEN/2], combined, (SLICE_LEN/2 + SLICE_LEN%2)*sizeof(int));
-
-			/* Put the greater values back to the right values buffer */
-			memcpy(right_val, &combined[SLICE_LEN/2 + SLICE_LEN%2], mpi_count*sizeof(int));
+			memcpy(&values[SLICE_LEN - SLICE_LEN/CONV_DIV], combined, (SLICE_LEN/CONV_DIV)*sizeof(int));
 
 		#if DEBUG == 1
 			printf("P%d: Combined array (sent) -> ", mpi_rank);
@@ -257,7 +264,7 @@ int main(int argc, char *argv[])
 		#endif
 
 			/* Send back the values to right */
-			MPI_Send(right_val, mpi_count, MPI_INT, mpi_rank + 1, 0, MPI_COMM_WORLD);
+			MPI_Send(&combined[SLICE_LEN/CONV_DIV], mpi_count, MPI_INT, mpi_rank + 1, 0, MPI_COMM_WORLD);
 		}
 
 	#if DEBUG == 1
@@ -266,9 +273,15 @@ int main(int argc, char *argv[])
 	#endif
 
 		/* Receive back the values from the left */
-		if(mpi_rank != 0){
+		if(
+			mpi_rank != 0
+		#if SKIP_CONVERGE == 1
+			/* OPTIMIZE: Only send if not sorted with my left neighbor */
+			&& !sorted[mpi_rank]
+		#endif
+		){
 			MPI_Status mpi_status;
-			MPI_Recv(values, SLICE_LEN / 2, MPI_INT, mpi_rank - 1, 0, MPI_COMM_WORLD, &mpi_status);
+			MPI_Recv(values, SLICE_LEN / CONV_DIV, MPI_INT, mpi_rank - 1, 0, MPI_COMM_WORLD, &mpi_status);
 		#if DEBUG == 1
 			printf("P%d: Combined array (received) -> ", mpi_rank);
 			print_array(values, SLICE_LEN);
@@ -336,7 +349,7 @@ void bubblesort(int *array, const int SIZE)
 	}
 }
 
-void combine(int *src_a, int len_a, int *src_b, int len_b, int *dst, int length)
+void merge_2(int *src_a, int len_a, int *src_b, int len_b, int *dst, int length)
 {
 	int ia = 0;
 	int ib = 0;
@@ -347,6 +360,23 @@ void combine(int *src_a, int len_a, int *src_b, int len_b, int *dst, int length)
 			dst[i] = src_b[ib++];
 	}
 }
+
+#if PREFER_MERGE == 1
+void merge_3(int *src_a, int len_a, int *src_b, int len_b, int *src_c, int len_c, int *dst, int length)
+{
+	int ia = 0;
+	int ib = 0;
+	int ic = 0;
+	for(int i = 0; i < length; i++){
+		if(ia < len_a && (ib == len_b || src_a[ia] <= src_b[ib]) && (ic == len_c || src_a[ia] <= src_c[ic]))
+			dst[i] = src_a[ia++];
+		else if(ib < len_b && (ia == len_a || src_b[ib] <= src_a[ia]) && (ic == len_c || src_b[ib] <= src_c[ic]))
+			dst[i] = src_b[ib++];
+		else
+			dst[i] = src_c[ic++];
+	}
+}
+#endif
 
 #if DEBUG == 1
 void print_array(int *array, int len)
