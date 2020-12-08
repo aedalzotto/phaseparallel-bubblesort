@@ -1,3 +1,11 @@
+/**
+ * Phase Parallel bubblesort using MPI
+ *
+ * @authors
+ * Angelo Elias Dalzotto (angelo.dalzotto@edu.pucrs.br)
+ * Anderson Camargo Sant'Ana (anderson.santana93@edu.pucrs.br)
+ */
+
 #include <stdbool.h>
 #include <stdlib.h>
 #include <string.h>
